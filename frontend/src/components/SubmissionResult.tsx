@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { useInterviewStore, ExecutionHistoryItem } from '../store/interview';
 import { ExecutionResult } from '../store/interview';
+import { ReportDownloadModal } from './ReportDownloadModal';
 
 type TestResult = NonNullable<ExecutionResult['testResults']>[number];
 
@@ -717,6 +718,7 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
   const [activeTab, setActiveTab] = useState<'current' | 'history'>('current');
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [compareCount, setCompareCount] = useState<number>(5);
+  const [reportOpen, setReportOpen] = useState(false);
 
   const passedCount = testResults?.filter(t => t.passed).length || 0;
   const failedCount = testResults?.filter(t => !t.passed).length || 0;
@@ -852,6 +854,37 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
               )}
             </button>
           ))}
+
+          <button
+            onClick={() => setReportOpen(true)}
+            title="将当前结果或历史对比记录导出为执行报告文件"
+            style={{
+              marginLeft: '8px',
+              padding: '4px 12px',
+              borderRadius: '4px',
+              border: '1px solid rgba(76, 175, 80, 0.4)',
+              background: 'rgba(76, 175, 80, 0.1)',
+              color: '#81c784',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              whiteSpace: 'nowrap',
+              transition: 'all 0.2s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(76, 175, 80, 0.2)';
+              e.currentTarget.style.borderColor = '#4caf50';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(76, 175, 80, 0.1)';
+              e.currentTarget.style.borderColor = 'rgba(76, 175, 80, 0.4)';
+            }}
+          >
+            📄 导出报告
+          </button>
         </div>
 
         {type === 'submit' && testResults && activeTab === 'current' && (
@@ -1293,6 +1326,23 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
           </div>
         )}
       </div>
+
+      <ReportDownloadModal
+        isOpen={reportOpen}
+        onClose={() => setReportOpen(false)}
+        currentResult={{
+          title,
+          type,
+          success,
+          output,
+          error,
+          runtime,
+          memory,
+          testResults,
+        }}
+        initialScope={activeTab === 'history' ? 'history' : 'current'}
+        initialHistoryCount={compareCount}
+      />
 
       <style>{`
         @keyframes pulse-border {
