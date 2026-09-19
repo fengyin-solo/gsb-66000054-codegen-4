@@ -1,6 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import { useInterviewStore, ExecutionHistoryItem } from '../store/interview';
 import { ExecutionResult } from '../store/interview';
+import { useToastStore } from '../store/toast';
+import { downloadReport, ReportFilter } from '../services/executionReportService';
 
 type TestResult = NonNullable<ExecutionResult['testResults']>[number];
 
@@ -701,6 +703,103 @@ const ComparisonCard: React.FC<{
   );
 };
 
+interface ReportNotice {
+  kind: 'error' | 'info';
+  message: string;
+}
+
+const DownloadReportButton: React.FC<{
+  activeTab: 'current' | 'history';
+  disabledReason: string | null;
+  loading: boolean;
+  onClick: () => void;
+}> = ({ activeTab, disabledReason, loading, onClick }) => {
+  return (
+    <button
+      onClick={onClick}
+      disabled={loading}
+      title={disabledReason
+        ? `${disabledReason}，无法生成执行报告`
+        : `下载${activeTab === 'current' ? '当前结果' : '历史对比'}执行报告（文本文件）`}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        padding: '4px 10px',
+        borderRadius: '4px',
+        border: '1px solid rgba(33, 150, 243, 0.4)',
+        background: loading ? 'rgba(33, 150, 243, 0.25)' : 'rgba(33, 150, 243, 0.12)',
+        color: loading ? '#90caf9' : '#64b5f6',
+        fontSize: '12px',
+        fontWeight: 500,
+        cursor: loading ? 'wait' : 'pointer',
+        opacity: disabledReason ? 0.55 : 1,
+        transition: 'all 0.2s',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{ fontSize: '12px', lineHeight: 1 }}>{loading ? '⏳' : '⬇'}</span>
+      {loading ? '正在生成...' : '下载执行报告'}
+    </button>
+  );
+};
+
+const ReportNoticeBar: React.FC<{
+  notice: ReportNotice;
+  onRetry?: () => void;
+  onClose: () => void;
+}> = ({ notice, onRetry, onClose }) => {
+  const isError = notice.kind === 'error';
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '10px',
+      padding: '8px 16px',
+      background: isError ? 'rgba(244, 67, 54, 0.08)' : 'rgba(255, 152, 0, 0.08)',
+      borderBottom: `1px solid ${isError ? 'rgba(244, 67, 54, 0.3)' : 'rgba(255, 152, 0, 0.3)'}`,
+      fontSize: '12px',
+      color: isError ? '#e57373' : '#ffb74d',
+    }}>
+      <span>{isError ? '⚠' : 'ℹ'}</span>
+      <span style={{ flex: 1 }}>{notice.message}</span>
+      {isError && onRetry && (
+        <button
+          onClick={onRetry}
+          style={{
+            padding: '2px 10px',
+            borderRadius: '4px',
+            border: '1px solid rgba(244, 67, 54, 0.5)',
+            background: 'rgba(244, 67, 54, 0.15)',
+            color: '#ef9a9a',
+            fontSize: '12px',
+            fontWeight: 600,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          重试下载
+        </button>
+      )}
+      <button
+        onClick={onClose}
+        title="关闭提示"
+        style={{
+          padding: '0 4px',
+          border: 'none',
+          background: 'transparent',
+          color: '#888',
+          fontSize: '14px',
+          lineHeight: 1,
+          cursor: 'pointer',
+        }}
+      >
+        ✕
+      </button>
+    </div>
+  );
+};
+
 export const SubmissionResult: React.FC<SubmissionResultProps> = ({
   title,
   type,
@@ -711,12 +810,15 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
   memory,
   testResults,
 }) => {
-  const { currentProblem, executionHistory } = useInterviewStore();
+  const { currentProblem, executionHistory, language } = useInterviewStore();
+  const toast = useToastStore();
   const [expandedIndex, setExpandedIndex] = useState<number | null>(0);
   const [filter, setFilter] = useState<'all' | 'passed' | 'failed'>('all');
   const [activeTab, setActiveTab] = useState<'current' | 'history'>('current');
   const [selectedHistoryId, setSelectedHistoryId] = useState<string | null>(null);
   const [compareCount, setCompareCount] = useState<number>(5);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportNotice, setReportNotice] = useState<ReportNotice | null>(null);
 
   const passedCount = testResults?.filter(t => t.passed).length || 0;
   const failedCount = testResults?.filter(t => !t.passed).length || 0;
@@ -762,6 +864,77 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
   }, [executionHistory]);
 
   const selectedHistory = executionHistory.find(h => h.id === selectedHistoryId);
+
+  const hasCurrentContent = !!(testResults?.length || output || error);
+  const currentDisabledReason = hasCurrentContent
+    ? null
+    : '当前暂无执行结果（代码尚未运行或提交）';
+  const historyDisabledReason = executionHistory.length === 0
+    ? '暂无执行历史（代码尚未运行或提交），无法生成历史对比报告'
+    : null;
+
+  const handleDownloadReport = async () => {
+    if (reportLoading) return;
+    setReportNotice(null);
+
+    if (activeTab === 'current') {
+      if (currentDisabledReason) {
+        setReportNotice({ kind: 'info', message: `${currentDisabledReason}，未生成报告文件。` });
+        return;
+      }
+
+      setReportLoading(true);
+      try {
+        await downloadReport({
+          kind: 'current',
+          title,
+          type,
+          language,
+          result: { success, output, error, runtime, memory, testResults },
+          filter: filter as ReportFilter,
+          problemTitle: currentProblem?.title,
+          timeLimit,
+          memoryLimit,
+        });
+        toast.success('执行报告已开始下载');
+      } catch (e) {
+        setReportNotice({
+          kind: 'error',
+          message: `执行报告下载失败：${e instanceof Error ? e.message : '未知错误'}。可点击右侧按钮重试。`,
+        });
+      } finally {
+        setReportLoading(false);
+      }
+      return;
+    }
+
+    if (historyDisabledReason) {
+      setReportNotice({ kind: 'info', message: `${historyDisabledReason}，未生成报告文件。` });
+      return;
+    }
+
+    setReportLoading(true);
+    try {
+      await downloadReport({
+        kind: 'history',
+        items: comparisonData.items,
+        compareCount,
+        totalHistoryCount: executionHistory.length,
+        selected: selectedHistory || null,
+        problemTitle: currentProblem?.title,
+        timeLimit,
+        memoryLimit,
+      });
+      toast.success(`历史对比执行报告已开始下载（最近 ${comparisonData.items.length} 条记录）`);
+    } catch (e) {
+      setReportNotice({
+        kind: 'error',
+        message: `执行报告下载失败：${e instanceof Error ? e.message : '未知错误'}。可点击右侧按钮重试。`,
+      });
+    } finally {
+      setReportLoading(false);
+    }
+  };
 
   return (
     <div style={{
@@ -817,41 +990,52 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
           </div>
         </div>
 
-        <div style={{ display: 'flex', gap: '4px' }}>
-          {[
-            { key: 'current', label: '当前结果' },
-            { key: 'history', label: '历史对比' },
-          ].map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => setActiveTab(key as 'current' | 'history')}
-              style={{
-                padding: '4px 12px',
-                borderRadius: '4px',
-                border: activeTab === key ? '1px solid #2196f3' : '1px solid transparent',
-                background: activeTab === key ? 'rgba(33, 150, 243, 0.15)' : 'transparent',
-                color: activeTab === key ? '#64b5f6' : '#888',
-                fontSize: '12px',
-                fontWeight: 500,
-                cursor: 'pointer',
-                transition: 'all 0.2s',
-              }}
-            >
-              {label}
-              {key === 'history' && submitHistory.length > 0 && (
-                <span style={{
-                  marginLeft: '4px',
-                  fontSize: '10px',
-                  background: '#2196f3',
-                  color: '#fff',
-                  padding: '1px 5px',
-                  borderRadius: '8px',
-                }}>
-                  {submitHistory.length}
-                </span>
-              )}
-            </button>
-          ))}
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: '4px' }}>
+            {[
+              { key: 'current', label: '当前结果' },
+              { key: 'history', label: '历史对比' },
+            ].map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => {
+                  setActiveTab(key as 'current' | 'history');
+                  setReportNotice(null);
+                }}
+                style={{
+                  padding: '4px 12px',
+                  borderRadius: '4px',
+                  border: activeTab === key ? '1px solid #2196f3' : '1px solid transparent',
+                  background: activeTab === key ? 'rgba(33, 150, 243, 0.15)' : 'transparent',
+                  color: activeTab === key ? '#64b5f6' : '#888',
+                  fontSize: '12px',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                }}
+              >
+                {label}
+                {key === 'history' && submitHistory.length > 0 && (
+                  <span style={{
+                    marginLeft: '4px',
+                    fontSize: '10px',
+                    background: '#2196f3',
+                    color: '#fff',
+                    padding: '1px 5px',
+                    borderRadius: '8px',
+                  }}>
+                    {submitHistory.length}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          <DownloadReportButton
+            activeTab={activeTab}
+            disabledReason={activeTab === 'current' ? currentDisabledReason : historyDisabledReason}
+            loading={reportLoading}
+            onClick={handleDownloadReport}
+          />
         </div>
 
         {type === 'submit' && testResults && activeTab === 'current' && (
@@ -875,6 +1059,14 @@ export const SubmissionResult: React.FC<SubmissionResultProps> = ({
           </div>
         )}
       </div>
+
+      {reportNotice && (
+        <ReportNoticeBar
+          notice={reportNotice}
+          onRetry={handleDownloadReport}
+          onClose={() => setReportNotice(null)}
+        />
+      )}
 
       {activeTab === 'current' && testResults && testResults.length > 0 && (
         <div style={{
